@@ -50,6 +50,8 @@
 #include "iconwindow.h"
 #include "iconwindow_attributes.h"
 
+#include "panel_statusbar.h"
+
 extern struct List                     iconwindow_Extensions;
 
 /*** Private Data *********************************************************/
@@ -62,15 +64,6 @@ static struct iconWindow_Extension      panelStatusBar__Extension;
 static struct List                      panelStatusBar__StatusBars;
 static struct NotifyRequest             panelStatusBar__PrefsNotifyRequest;
 static Object                           *panelStatusBar__PrefsNotificationObject;
-
-struct panel_StatusBar_DATA
-{
-    struct Node                         iwp_Node;
-    IPTR                                iwp_Flags;
-    Object                              *iwp_StatusBar_StatusBarObj;
-    Object                              *iwp_StatusBar_StatusTextObj;
-    struct Hook                         iwp_StatusBar_updateHook;
-};
 
 /// From panel_toolbar
 STRPTR ExpandEnvName(CONST_STRPTR env_path);
@@ -525,7 +518,7 @@ static IPTR panelStatusBar__OM_SET(Class *CLASS, Object *self, struct opSet *mes
                         if (panelStatusBarPrivate->iwp_StatusBar_StatusBarObj != NULL)
                         {
                             data->iwd_BottomPanel.iwp_PanelGroupSpacerObj = HSpace(0);
-                
+
                             SET(data->iwd_BottomPanel.iwp_PanelContainerObj, MUIA_Frame, MUIV_Frame_None);
                             SET(data->iwd_BottomPanel.iwp_PanelContainerObj, MUIA_Group_Spacing, 0);
 
