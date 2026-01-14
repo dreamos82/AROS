@@ -1288,31 +1288,20 @@ IPTR IconWindow__MUIM_IconWindow_Clicked
                     GET(panelStatusBarPrivate->iwp_StatusBar_StatusTextObj, MUIA_Text_Contents, &status_str);
                     struct IconList_Click *ic_entry = msg.click;
                     if (ic_entry != NULL) {
-                        bug("(%s) IconList_click: %x\n", __FUNCTION__, ic_entry);
                         struct IconList_Entry *il_entry = ic_entry->entry;
-                        bug("(%s) IconList_Entry: %x\n", __FUNCTION__, il_entry);
                         char *selected_substring = strstr(status_str, "Selected");
                         int position = selected_substring - status_str;
-
-                        bug("\t%s ----- icon entry not null %s\n", __FUNCTION__, selected_substring);
                         if (selected_substring != NULL) {
-                            bug("\t%s--- selected substring is not null\n", __FUNCTION__);
                             strncpy((char *) new_status_str, status_str, position - 1);
-                            bug("\t%s ----- position %s\n", __FUNCTION__, new_status_str);
                             if (il_entry != NULL) {
                                 sprintf(&new_status_str[position-1], " Selected: %s", il_entry->label);
-                                bug("\t----icon label is not null Entry label: %s\n", new_status_str);
                                 SET(panelStatusBarPrivate->iwp_StatusBar_StatusTextObj, MUIA_Text_Contents, (IPTR)new_status_str);
                             }
                         } else {
-                                bug("\t----%s selected_substring is null Status_str: %s\n", __FUNCTION__, status_str);
-                                bug("\t----2 Entry label: il_entry->label: %s\n", il_entry->label);
                             if (il_entry != NULL) {
-                                bug("\t----Iconlable is not null)");
                                 sprintf(new_status_str, "%s Selected: %s", status_str, il_entry->label);
                                 SET(panelStatusBarPrivate->iwp_StatusBar_StatusTextObj, MUIA_Text_Contents, (IPTR)new_status_str);
                             } else {
-                                bug("\t----Iconlable is null)");
                                 SET(panelStatusBarPrivate->iwp_StatusBar_StatusTextObj, MUIA_Text_Contents, (IPTR)status_str);
                             }
                         }
