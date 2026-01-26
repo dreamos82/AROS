@@ -57,6 +57,9 @@ include $(SRCDIR)/config/aros.cfg
 #MM     workbench-libs-z \
 #MM     workbench-libs-zstd
 
+##MM- workbench-libs-complete : \
+##MM     workbench-libs-fd
+
 #MM- includes-generate : \
 #MM     workbench-libs-amigaguide-includes \
 #MM     workbench-libs-asl-includes \
@@ -107,3 +110,6 @@ include $(SRCDIR)/config/aros.cfg
 #MM     workbench-libs-workbench-includes \
 #MM     workbench-libs-z-includes \
 #MM     workbench-libs-zstd-includes
+
+##MM- includes-generate : \
+##MM     workbench-libs-fd-includes

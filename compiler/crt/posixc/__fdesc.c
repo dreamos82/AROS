@@ -1,5 +1,5 @@
 /*
-    Copyright (C) 1995-2025, The AROS Development Team. All rights reserved.
+    Copyright (C) 1995-2026, The AROS Development Team. All rights reserved.
 
     File descriptor handling internals.
 */
@@ -15,6 +15,8 @@
 #include <dos/dos.h>
 #include <dos/stdio.h>
 #include <aros/symbolsets.h>
+#include <libraries/fd.h>
+#include <proto/fd.h>
 
 #include <string.h>
 #include <fcntl.h>
@@ -24,6 +26,26 @@
 
 #include "__fdesc.h"
 #include "__upath.h"
+
+#ifdef errno
+#undef errno
+#endif
+#define errno (*(&((struct PosixCBase *)PosixCBase)->StdCBase->_errno))
+
+static int __fdlib_available(struct PosixCIntBase *PosixCBase)
+{
+    if (PosixCBase->PosixCFDBase == NULL)
+        PosixCBase->PosixCFDBase = OpenLibrary("fd.library", 0);
+
+    return PosixCBase->PosixCFDBase != NULL;
+}
+
+static void __set_errno(struct PosixCIntBase *PosixCBase, int enval)
+{
+    if (((struct PosixCBase *)PosixCBase)->StdCBase) {
+        errno = enval;
+    }
+}
 
 /* TODO: Add locking to make filedesc usage thread safe
    Using vfork()+exec*() filedescriptors may be shared between different
@@ -83,6 +105,14 @@ void __setfdesc(register int fd, fdesc *desc)
 
     /* FIXME: Check if fd is in valid range... */
     PosixCBase->fd_array[fd] = desc;
+
+    if (__fdlib_available(PosixCBase)) {
+        struct Library *FDBase = PosixCBase->PosixCFDBase;
+        if (desc)
+            FD_SetData(fd, FD_OWNER_POSIXC, desc);
+        else
+            FD_Free(fd, FD_OWNER_POSIXC);
+    }
 }
 
 int __getfirstfd(register int startfd)
@@ -91,19 +121,33 @@ int __getfirstfd(register int startfd)
         (struct PosixCIntBase *)__aros_getbase_PosixCBase();
 
     /* FIXME: Check if fd is in valid range... */
-    for (
-        ;
-        startfd < PosixCBase->fd_slots && PosixCBase->fd_array[startfd];
-        startfd++
-    );
+    if (!__fdlib_available(PosixCBase)) {
+        for (
+            ;
+            startfd < PosixCBase->fd_slots && PosixCBase->fd_array[startfd];
+            startfd++
+        );
 
-    return startfd;
+        return startfd;
+    }
+
+    struct Library *FDBase = PosixCBase->PosixCFDBase;
+    for (;;) {
+        if (startfd < PosixCBase->fd_slots && PosixCBase->fd_array[startfd]) {
+            startfd++;
+            continue;
+        }
+        if (FD_Check(startfd) == 0)
+            return startfd;
+        startfd++;
+    }
 }
 
 int __getfdslot(int wanted_fd)
 {
     struct PosixCIntBase *PosixCBase =
         (struct PosixCIntBase *)__aros_getbase_PosixCBase();
+    LONG error;
 
     if (wanted_fd>=PosixCBase->fd_slots)
     {
@@ -125,14 +169,23 @@ int __getfdslot(int wanted_fd)
     }
     else if (wanted_fd < 0)
     {
-        errno = EINVAL;
+        __set_errno(PosixCBase, EINVAL);
         return -1;
     }
     else if (PosixCBase->fd_array[wanted_fd])
     {
         close(wanted_fd);
     }
-    
+
+    if (__fdlib_available(PosixCBase)) {
+        struct Library *FDBase = PosixCBase->PosixCFDBase;
+        error = FD_Reserve(wanted_fd, FD_OWNER_POSIXC, NULL);
+        if (error) {
+            __set_errno(PosixCBase, error);
+            return -1;
+        }
+    }
+
     return wanted_fd;
 }
 
@@ -183,6 +236,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
 
     BPTR fh = BNULL, lock = BNULL;
     fdesc *currdesc = NULL;
+    int reserved_fd = 0;
     fcb *cblock = NULL;
     struct FileInfoBlock *fib = NULL;
     LONG  openmode = __oflags2amode(flags);
@@ -190,7 +244,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
     if (PosixCBase->doupath && pathname[0] == '\0')
     {
         /* On *nix "" is not really a valid file name.  */
-        errno = ENOENT;
+        __set_errno(PosixCBase, ENOENT);
         return -1;
     }
 
@@ -201,7 +255,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
 
     if (openmode == -1)
     {
-        errno = EINVAL;
+        __set_errno(PosixCBase, EINVAL);
         D(bug( "__open: bad mode, exiting with error EINVAL\n"));
         return -1;
     }
@@ -215,6 +269,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
 
     wanted_fd = __getfdslot(wanted_fd);
     if (wanted_fd == -1) { D(bug("__open: no free fd\n")); goto err; }
+    reserved_fd = 1;
 
     /*
      * In case of file system, test existance of file. Non-file system handlers (i.e CON:)
@@ -231,7 +286,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
                    Needed for sfs file system which reports this error number on a
                    Lock aaa/bbb/ccc with bbb being a file instead of a directory.
                 */
-                errno = ENOTDIR;
+                __set_errno(PosixCBase, ENOTDIR);
                 goto err;
             }
 
@@ -242,7 +297,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
                 (IoErr() == ERROR_OBJECT_NOT_FOUND && !(flags & O_CREAT))
             )
             {
-                errno = __stdc_ioerr2errno(IoErr());
+                __set_errno(PosixCBase, __stdc_ioerr2errno(IoErr()));
                 goto err;
             }
         }
@@ -251,14 +306,14 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
             /* If the file exists, but O_EXCL is set, then return an error */
             if (flags & O_EXCL)
             {
-                errno = EEXIST;
+                __set_errno(PosixCBase, EEXIST);
                 goto err;
             }
 
             fib = AllocDosObject(DOS_FIB, NULL);
             if (!fib)
             {
-               errno = __stdc_ioerr2errno(IoErr());
+                __set_errno(PosixCBase, __stdc_ioerr2errno(IoErr()));
                goto err;
             }
 
@@ -282,7 +337,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
                 /* A directory cannot be opened for writing */
                 if (openmode != MODE_OLDFILE)
                 {
-                    errno = EISDIR;
+                    __set_errno(PosixCBase, EISDIR);
                     goto err;
                 }
 
@@ -321,7 +376,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
     {
         ULONG ioerr = IoErr();
         D(bug("__open: Open ioerr=%d\n", ioerr));
-        errno = __stdc_ioerr2errno(ioerr);
+        __set_errno(PosixCBase, __stdc_ioerr2errno(ioerr));
         goto err;
     }
 
@@ -340,7 +395,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
                ioerr != ERROR_ACTION_NOT_KNOWN)
             {
                 D(bug("__open: SetFileSize ioerr=%d\n", ioerr));
-                errno = __stdc_ioerr2errno(ioerr);
+                __set_errno(PosixCBase, __stdc_ioerr2errno(ioerr));
                 goto err;
             }
         }
@@ -350,7 +405,7 @@ int __open(int wanted_fd, const char *pathname, int flags, int mode)
     if ((flags & O_APPEND) && (flags & (O_RDWR | O_WRONLY)))
     {
         if(Seek(fh, 0, OFFSET_END) != 0) {
-            errno = __stdc_ioerr2errno(IoErr());
+            __set_errno(PosixCBase, __stdc_ioerr2errno(IoErr()));
             goto err;
         }
     }
@@ -373,6 +428,8 @@ err:
     if (currdesc) __free_fdesc(currdesc);
     if (fh && fh != lock) Close(fh);
     if (lock) UnLock(lock);
+    if (reserved_fd)
+        __setfdesc(wanted_fd, NULL);
 
     D(bug("__open: exiting with error %d\n", errno ));
 
@@ -599,4 +656,3 @@ void __updatestdio(void)
 
 ADD2OPENLIB(__init_fd, 2);
 ADD2CLOSELIB(__exit_fd, 2);
-

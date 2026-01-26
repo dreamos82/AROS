@@ -1,5 +1,5 @@
 /*
-    Copyright (C) 1995-2023, The AROS Development Team. All rights reserved.
+    Copyright (C) 1995-2026, The AROS Development Team. All rights reserved.
 */
 
 #define __KERNEL_NOLIBBASE__
@@ -23,6 +23,8 @@
 
 #include "apic.h"
 #include "apic_ia32.h"
+
+#include "cpu_freq.h"
 
 #define AROS_NO_ATOMIC_OPERATIONS
 #include <exec_platform.h>
@@ -359,4 +361,200 @@ SAVE_XMM_AND_CHECK
         DSCHED(bug("[Kernel:%03u]" DEBUGCOLOR_SET " %s: INVALID STATE!!" DEBUGCOLOR_RESET "\n", cpunum, __func__);)
     }
     core_Switch();
+}
+
+/* x86_64 CPU frequency control */
+
+#define CPUID_VEND_EBX_INTEL 0x756e6547u /* "Genu" */
+#define CPUID_VEND_EDX_INTEL 0x49656e69u /* "ineI" */
+#define CPUID_VEND_ECX_INTEL 0x6c65746eu /* "ntel" */
+#define CPUID_VEND_EBX_AMD   0x68747541u /* "Auth" */
+#define CPUID_VEND_EDX_AMD   0x69746e65u /* "enti" */
+#define CPUID_VEND_ECX_AMD   0x444d4163u /* "cAMD" */
+
+static BOOL core_x86VendorMatches(unsigned int vendor_ebx, unsigned int vendor_edx, unsigned int vendor_ecx)
+{
+    unsigned int eax, ebx, ecx, edx;
+
+    cpuid2(0, 0, &eax, &ebx, &ecx, &edx);
+
+    /* Vendor string is EBX, EDX, ECX for CPUID leaf 0 */
+    return (ebx == vendor_ebx) &&
+           (edx == vendor_edx) &&
+           (ecx == vendor_ecx);
+}
+
+static BOOL x86_64_cpu_perf_init_core_intel(struct PlatformData *pdata, apicid_t cpuNum)
+{
+    struct APICData *apicData = pdata->kb_APIC;
+    struct CPUData *core;
+    UQUAD platform_info;
+    UQUAD perf_status;
+    UBYTE max_ratio;
+    UBYTE min_ratio;
+
+    if (!apicData || cpuNum >= apicData->apic_count)
+        return FALSE;
+
+    core = &apicData->cores[cpuNum];
+    if (core->cpu_PerfCapable)
+        return TRUE;
+
+    platform_info = rdmsrq(MSR_PLATFORM_INFO);
+    max_ratio = (platform_info >> 8) & 0xff;
+    min_ratio = (platform_info >> 40) & 0xff;
+
+    if (!max_ratio)
+        return FALSE;
+    if (!min_ratio)
+        min_ratio = max_ratio;
+
+    perf_status = rdmsrq(MSR_IA32_PERF_STATUS);
+
+    core->cpu_PerfMaxRatio = max_ratio;
+    core->cpu_PerfMinRatio = min_ratio;
+    core->cpu_PerfCurRatio = (perf_status >> 8) & 0xff;
+    core->cpu_PerfCapable = 1;
+
+    return TRUE;
+}
+
+static BOOL x86_64_cpu_perf_init_core_amd(struct PlatformData *pdata, apicid_t cpuNum)
+{
+    struct APICData *apicData = pdata->kb_APIC;
+    struct CPUData *core;
+    UQUAD perf_status;
+    UBYTE lowest_pstate = 0xff;
+    UBYTE highest_pstate = 0;
+
+    if (!apicData || cpuNum >= apicData->apic_count)
+        return FALSE;
+
+    core = &apicData->cores[cpuNum];
+    if (core->cpu_PerfCapable)
+        return TRUE;
+
+    for (UBYTE pstate = 0; pstate <= (MSR_AMD_PSTATE_MAX - MSR_AMD_PSTATE_0); pstate++)
+    {
+        UQUAD msr = rdmsrq(MSR_AMD_PSTATE_0 + pstate);
+        if (msr & AMD_PSTATE_ENABLED)
+        {
+            if (pstate < lowest_pstate)
+                lowest_pstate = pstate;
+            if (pstate > highest_pstate)
+                highest_pstate = pstate;
+        }
+    }
+
+    if (lowest_pstate == 0xff)
+        return FALSE;
+
+    perf_status = rdmsrq(MSR_AMD_PSTATE_STATUS);
+
+    core->cpu_PerfMaxRatio = lowest_pstate;
+    core->cpu_PerfMinRatio = highest_pstate;
+    core->cpu_PerfCurRatio = perf_status & AMD_PSTATE_STATUS_MASK;
+    core->cpu_PerfCapable = 1;
+
+    return TRUE;
+}
+
+static BOOL x86_64_CPUFreqSet_intel(struct PlatformData *pdata, apicid_t cpuNum, UBYTE ratio)
+{
+    struct APICData *apicData;
+    struct CPUData *core;
+    UQUAD perf_ctl;
+
+    if (!pdata || !(pdata->kb_PDFlags & PLATFORMF_CPUFREQ))
+        return FALSE;
+
+    if (!x86_64_cpu_perf_init_core_intel(pdata, cpuNum))
+        return FALSE;
+
+    apicData = pdata->kb_APIC;
+    core = &apicData->cores[cpuNum];
+
+    if (ratio < core->cpu_PerfMinRatio)
+        ratio = core->cpu_PerfMinRatio;
+    if (ratio > core->cpu_PerfMaxRatio)
+        ratio = core->cpu_PerfMaxRatio;
+
+    perf_ctl = rdmsrq(MSR_IA32_PERF_CTL);
+    perf_ctl = (perf_ctl & ~PERF_CTL_RATIO_MASK) | ((UQUAD)ratio << 8);
+    wrmsrq(MSR_IA32_PERF_CTL, perf_ctl);
+
+    return TRUE;
+}
+
+static BOOL x86_64_CPUFreqSet_amd(struct PlatformData *pdata, apicid_t cpuNum, UBYTE pstate)
+{
+    struct APICData *apicData;
+    struct CPUData *core;
+    UQUAD pstate_ctl;
+
+    if (!pdata || !(pdata->kb_PDFlags & PLATFORMF_CPUFREQ))
+        return FALSE;
+
+    if (!x86_64_cpu_perf_init_core_amd(pdata, cpuNum))
+        return FALSE;
+
+    apicData = pdata->kb_APIC;
+    core = &apicData->cores[cpuNum];
+
+    if (pstate < core->cpu_PerfMaxRatio)
+        pstate = core->cpu_PerfMaxRatio;
+    if (pstate > core->cpu_PerfMinRatio)
+        pstate = core->cpu_PerfMinRatio;
+
+    pstate_ctl = rdmsrq(MSR_AMD_PSTATE_CTL);
+    pstate_ctl = (pstate_ctl & ~AMD_PSTATE_CTL_MASK) | (pstate & AMD_PSTATE_CTL_MASK);
+    wrmsrq(MSR_AMD_PSTATE_CTL, pstate_ctl);
+
+    return TRUE;
+}
+
+void core_CPUFreqInit(struct PlatformData *pdata)
+{
+    unsigned int eax, ebx, ecx, edx;
+
+    if (!pdata)
+        return;
+
+    cpuid2(1, 0, &eax, &ebx, &ecx, &edx);
+    if (!(edx & CPUID_FEAT_EDX_MSR))
+        return;
+
+    if (core_x86VendorMatches(CPUID_VEND_EBX_INTEL, CPUID_VEND_EDX_INTEL, CPUID_VEND_ECX_INTEL))
+    {
+        if (!(ecx & CPUID_FEAT_ECX_EIST))
+        {
+            if (!x86_64_cpu_perf_init_core_intel(pdata, 0))
+                return;
+        }
+        pdata->kb_CPUFreqSet = x86_64_CPUFreqSet_intel;
+    }
+    else if (core_x86VendorMatches(CPUID_VEND_EBX_AMD, CPUID_VEND_EDX_AMD, CPUID_VEND_ECX_AMD))
+    {
+        cpuid2(0x80000000, 0, &eax, &ebx, &ecx, &edx);
+        if (eax < 0x80000007)
+            return;
+
+        cpuid2(0x80000007, 0, &eax, &ebx, &ecx, &edx);
+        if (!(edx & CPUID_EXT_PM_EDX_HW_PSTATE))
+            return;
+
+        if (!x86_64_cpu_perf_init_core_amd(pdata, 0))
+            return;
+
+        pdata->kb_CPUFreqSet = x86_64_CPUFreqSet_amd;
+    }
+    else
+    {
+        return;
+    }
+
+    pdata->kb_CPUFreqPolicy.up_threshold = CPUFREQ_LOAD_HIGH;
+    pdata->kb_CPUFreqPolicy.down_threshold = CPUFREQ_LOAD_LOW;
+    pdata->kb_CPUFreqPolicy.levels = CPUFREQ_LEVELS_DEFAULT;
+    pdata->kb_PDFlags |= PLATFORMF_CPUFREQ;
 }
